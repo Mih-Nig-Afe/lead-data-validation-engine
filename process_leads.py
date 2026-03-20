@@ -77,6 +77,20 @@ def parse_req_map(req: str) -> Dict[str, str]:
     return result
 
 
+def req_raw_text(row: Mapping[str, object]) -> str:
+    cached = row.get("_req_raw")
+    if isinstance(cached, str):
+        return cached
+    return norm_text(row.get("req"))
+
+
+def req_map_data(row: Mapping[str, object]) -> Dict[str, str]:
+    cached = row.get("_req_map")
+    if isinstance(cached, dict):
+        return cached
+    return parse_req_map(req_raw_text(row))
+
+
 def to_slug_tokens(text: str) -> List[str]:
     text = text.lower()
     text = re.sub(r"[^a-z0-9\s]", " ", text)
@@ -197,7 +211,7 @@ def infer_title_level(title: str) -> float:
     if "senior" in t:
         base_level += 0.5
 
-    return max(base_level, 1.0)
+    return min(max(base_level, 1.0), 6.0)
 
 
 def email_domain(email: str) -> str:
@@ -307,8 +321,8 @@ def first_matching_keyword(title: str, keywords: List[str]) -> Optional[str]:
 
 def check_title_pl_summary(row: Mapping[str, object]) -> Tuple[str, str]:
     title = norm_text(row.get("title"))
-    req_raw = norm_text(row.get("req"))
-    req_map = parse_req_map(req_raw)
+    req_raw = req_raw_text(row)
+    req_map = req_map_data(row)
 
     if not title:
         return "INVALID", "Missing title"
@@ -352,7 +366,7 @@ def check_prooflink(row: Mapping[str, object]) -> Tuple[str, str]:
 
 
 def check_geo(row: Mapping[str, object]) -> Tuple[str, str]:
-    req_map = parse_req_map(norm_text(row.get("req")))
+    req_map = req_map_data(row)
     geo_req = req_map.get("geo", "")
     location = clean_text(row.get("location")).lower()
 
@@ -371,7 +385,7 @@ def check_geo(row: Mapping[str, object]) -> Tuple[str, str]:
     candidates = []
     for token in raw_tokens:
         token = token.strip()
-        if len(token) < 3:
+        if len(token) < 2:
             continue
         if token in {
             "geo",
@@ -461,8 +475,8 @@ def validate_company_size_field(
 
 
 def check_other(row: Mapping[str, object]) -> Tuple[str, str]:
-    req_raw = norm_text(row.get("req"))
-    req_map = parse_req_map(req_raw)
+    req_raw = req_raw_text(row)
+    req_map = req_map_data(row)
     issues: List[str] = []
 
     # Keep status shortcut for explicit retired/suspicious markers.
@@ -470,13 +484,12 @@ def check_other(row: Mapping[str, object]) -> Tuple[str, str]:
     if status == "a":
         return "INVALID", "Retrieved lead"
 
-    email = norm_text(row.get("email")).lower()
-    row_industry = norm_text(row.get("industry")).lower()
-
     validators: List[Callable[[Mapping[str, object]], Optional[str]]] = [
         lambda r: validate_required_profile_fields(r),
-        lambda r: validate_email_field(email),
-        lambda r: validate_industry_field(row_industry, req_map, req_raw),
+        lambda r: validate_email_field(norm_text(r.get("email")).lower()),
+        lambda r: validate_industry_field(
+            norm_text(r.get("industry")).lower(), req_map, req_raw
+        ),
         lambda r: validate_company_size_field(norm_text(r.get("employees")), req_map),
     ]
 
@@ -499,24 +512,18 @@ def check_other(row: Mapping[str, object]) -> Tuple[str, str]:
 
 
 def validate_row(row: Mapping[str, object]) -> Tuple[str, str]:
-    sub_status = norm_text(row.get("sub status")).lower()
+    sub_status = SPACE_REGEX.sub(" ", norm_text(row.get("sub status")).lower()).strip()
 
-    if sub_status == "n/a: title/pl summary":
+    if "title" in sub_status and "summary" in sub_status:
         return check_title_pl_summary(row)
-    if sub_status == "n/a: prooflink":
+    if "prooflink" in sub_status:
         return check_prooflink(row)
-    if sub_status == "n1: nwc":
+    if "n1" in sub_status and "nwc" in sub_status:
         return check_nwc(row)
-    if sub_status == "n/a: country/geo":
+    if "country" in sub_status or "geo" in sub_status:
         return check_geo(row)
 
-    if sub_status in {
-        "n/a: other",
-        "n/a: other (auto)",
-        "n/a: other (company)",
-        "n2: out of business/bad data",
-        "n2: out of business/bad data (company)",
-    }:
+    if "other" in sub_status or "out of business" in sub_status or "bad data" in sub_status:
         return check_other(row)
 
     # Fallback for unexpected categories.
@@ -540,6 +547,12 @@ def process_file(input_path: str, output_base: str) -> None:
     results: List[str] = []
     comments: List[str] = []
     records = df.to_dict(orient="records")
+
+    for row in records:
+        req_raw = norm_text(row.get("req"))
+        row["_req_raw"] = req_raw
+        row["_req_map"] = parse_req_map(req_raw)
+
     for row in records:
         result, comment = validate_row(row)
         results.append(result)
