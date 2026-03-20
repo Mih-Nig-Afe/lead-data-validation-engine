@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -76,6 +76,13 @@ def to_slug_tokens(text: str) -> List[str]:
     return [t for t in text.split(" ") if len(t) > 1]
 
 
+def contains_word(text: str, word: str) -> bool:
+    normalized_word = re.sub(r"\s+", " ", word.strip().lower())
+    if not normalized_word:
+        return False
+    return re.search(rf"\b{re.escape(normalized_word)}\b", text.lower()) is not None
+
+
 def extract_keywords(req_map: Dict[str, str], req_raw: str) -> Optional[List[str]]:
     raw = req_map.get("keywords", "")
     raw_l = raw.lower()
@@ -140,6 +147,10 @@ def infer_min_level(level_text: str, req_raw: str) -> int:
 
 def infer_title_level(title: str) -> int:
     t = title.lower()
+    if "senior director" in t:
+        return 5
+    if "assistant director" in t:
+        return 3
     if any(
         k in t
         for k in [
@@ -258,20 +269,19 @@ def extract_industry_requirements(
 
 
 def first_matching_keyword(title: str, keywords: List[str]) -> Optional[str]:
-    t = " " + " ".join(to_slug_tokens(title)) + " "
+    title_tokens = set(to_slug_tokens(title))
+    if not title_tokens:
+        return None
     for kw in keywords:
         kt = to_slug_tokens(kw)
         if not kt:
             continue
-        phrase = " " + " ".join(kt) + " "
-        if phrase in t:
-            return kw
-        if len(kt) == 1 and f" {kt[0]} " in t:
+        if all(token in title_tokens for token in kt):
             return kw
     return None
 
 
-def check_title_pl_summary(row: pd.Series) -> Tuple[str, str]:
+def check_title_pl_summary(row: Mapping[str, object]) -> Tuple[str, str]:
     title = norm_text(row.get("title"))
     req_raw = norm_text(row.get("req"))
     req_map = parse_req_map(req_raw)
@@ -301,7 +311,7 @@ def check_title_pl_summary(row: pd.Series) -> Tuple[str, str]:
     return "VALID", "No keyword requirements"
 
 
-def check_prooflink(row: pd.Series) -> Tuple[str, str]:
+def check_prooflink(row: Mapping[str, object]) -> Tuple[str, str]:
     prooflink = norm_text(row.get("prooflink")).lower()
     email = norm_text(row.get("email"))
 
@@ -317,7 +327,7 @@ def check_prooflink(row: pd.Series) -> Tuple[str, str]:
     return "INVALID", "Prooflink does not match allowed sources"
 
 
-def check_geo(row: pd.Series) -> Tuple[str, str]:
+def check_geo(row: Mapping[str, object]) -> Tuple[str, str]:
     req_map = parse_req_map(norm_text(row.get("req")))
     geo_req = req_map.get("geo", "")
     location = clean_text(row.get("location")).lower()
@@ -355,13 +365,13 @@ def check_geo(row: pd.Series) -> Tuple[str, str]:
         return "VALID", "GEO requirements could not be parsed"
 
     for c in candidates:
-        if c in location:
+        if contains_word(location, c):
             return "VALID", "Location matches GEO requirements"
 
     return "INVALID", "Location does not match GEO requirements"
 
 
-def check_nwc(row: pd.Series) -> Tuple[str, str]:
+def check_nwc(row: Mapping[str, object]) -> Tuple[str, str]:
     status = norm_text(row.get("status")).lower()
     if not status or status == "valid":
         return "VALID", "NWC status clear"
@@ -374,7 +384,58 @@ def check_nwc(row: pd.Series) -> Tuple[str, str]:
     return "INVALID", f"Unknown status value: {status}"
 
 
-def check_other(row: pd.Series) -> Tuple[str, str]:
+def validate_required_profile_fields(row: Mapping[str, object]) -> Optional[str]:
+    mandatory = ["first_name", "last_name", "company", "title", "email", "industry"]
+    missing = [c for c in mandatory if not norm_text(row.get(c))]
+    if missing:
+        return "Missing profile data"
+    return None
+
+
+def validate_email_field(email: str) -> Optional[str]:
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        return "Invalid email format"
+    domain = email_domain(email)
+    if domain in PUBLIC_EMAIL_DOMAINS:
+        return "Email should be corporate"
+    return None
+
+
+def validate_industry_field(
+    row_industry: str, req_map: Dict[str, str], req_raw: str
+) -> Optional[str]:
+    industries = extract_industry_requirements(req_map, req_raw)
+    req_lower = clean_text(req_raw).lower()
+
+    if not row_industry:
+        return None
+
+    if industries:
+        if not any(
+            clean_text(i).lower() in row_industry
+            or row_industry in clean_text(i).lower()
+            for i in industries
+        ):
+            return "Industry: Industry does not match requirements"
+        return None
+
+    raw_ind = req_map.get("industry", "").lower()
+    if "see comment" in raw_ind and row_industry not in req_lower:
+        return "Industry: Industry does not match requirements"
+    return None
+
+
+def validate_company_size_field(
+    employees: str, req_map: Dict[str, str]
+) -> Optional[str]:
+    required_min = parse_required_company_min(req_map.get("company_size", ""))
+    row_floor = parse_employee_floor(employees)
+    if required_min is not None and row_floor is not None and row_floor < required_min:
+        return "Company size below requirement"
+    return None
+
+
+def check_other(row: Mapping[str, object]) -> Tuple[str, str]:
     req_raw = norm_text(row.get("req"))
     req_map = parse_req_map(req_raw)
     issues: List[str] = []
@@ -384,38 +445,25 @@ def check_other(row: pd.Series) -> Tuple[str, str]:
     if status == "a":
         return "INVALID", "Retrieved lead"
 
-    mandatory = ["first_name", "last_name", "company", "title", "email", "industry"]
-    missing = [c for c in mandatory if not norm_text(row.get(c))]
-    if missing:
-        issues.append("Missing profile data")
+    profile_issue = validate_required_profile_fields(row)
+    if profile_issue:
+        issues.append(profile_issue)
 
     email = norm_text(row.get("email")).lower()
-    domain = email_domain(email)
-    if not domain:
-        issues.append("Invalid email format")
-    elif domain in PUBLIC_EMAIL_DOMAINS:
-        issues.append("Email should be corporate")
+    email_issue = validate_email_field(email)
+    if email_issue:
+        issues.append(email_issue)
 
-    industries = extract_industry_requirements(req_map, req_raw)
     row_industry = norm_text(row.get("industry")).lower()
-    req_lower = clean_text(req_raw).lower()
-    if row_industry:
-        if industries:
-            if not any(
-                clean_text(i).lower() in row_industry
-                or row_industry in clean_text(i).lower()
-                for i in industries
-            ):
-                issues.append("Industry: Industry does not match requirements")
-        else:
-            raw_ind = req_map.get("industry", "").lower()
-            if "see comment" in raw_ind and row_industry not in req_lower:
-                issues.append("Industry: Industry does not match requirements")
+    industry_issue = validate_industry_field(row_industry, req_map, req_raw)
+    if industry_issue:
+        issues.append(industry_issue)
 
-    required_min = parse_required_company_min(req_map.get("company_size", ""))
-    row_floor = parse_employee_floor(norm_text(row.get("employees")))
-    if required_min is not None and row_floor is not None and row_floor < required_min:
-        issues.append("Company size below requirement")
+    company_size_issue = validate_company_size_field(
+        norm_text(row.get("employees")), req_map
+    )
+    if company_size_issue:
+        issues.append(company_size_issue)
 
     # Apply title/keyword logic for mixed "Other" checks when company/industry checks passed.
     title_result, title_comment = check_title_pl_summary(row)
@@ -430,7 +478,7 @@ def check_other(row: pd.Series) -> Tuple[str, str]:
     return "VALID", "Lead data matches requirements"
 
 
-def validate_row(row: pd.Series) -> Tuple[str, str]:
+def validate_row(row: Mapping[str, object]) -> Tuple[str, str]:
     sub_status = norm_text(row.get("sub status")).lower()
 
     if sub_status == "n/a: title/pl summary":
@@ -471,7 +519,8 @@ def process_file(input_path: str, output_base: str) -> None:
 
     results: List[str] = []
     comments: List[str] = []
-    for _, row in df.iterrows():
+    records = df.to_dict(orient="records")
+    for row in records:
         result, comment = validate_row(row)
         results.append(result)
         comments.append(compact_comment(comment))

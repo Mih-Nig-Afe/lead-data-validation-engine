@@ -12,6 +12,8 @@
 - Reads the test sheet from `DataCheck_DemoCode.xlsx`.
 - Routes each row to validation logic based on `sub status`.
 - Compares row data against parsed rules from `req`.
+- Uses dictionary iteration (`to_dict(orient="records")`) for better performance on large datasets.
+- Uses regex-based normalization and matching to reduce false positives.
 - Writes `Result` and `Comment` columns.
 - Exports both XLSX and CSV outputs.
 
@@ -29,7 +31,7 @@
   - `status = !` => `INVALID` (`Suspicious lead`)
   - `status in {r, no info, no company match}` => `RECHECK`
 - `N/A: Country/GEO`
-  - Parses `Geo:` requirement and checks whether location contains one of required countries.
+  - Parses `Geo:` requirement and checks word-boundary country matches to avoid substring errors.
 - `N/A: Other`, `N/A: Other (auto)`, `N/A: Other (company)`, `N2: ...`
   - Checks required profile fields.
   - Checks email format and corporate domain usage.
