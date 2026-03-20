@@ -44,6 +44,8 @@
 - `INVALID`: one or more rule violations found.
 - `RECHECK`: status indicates manual verification is needed.
 
+The system is designed to be easily extendable by adding new validators without modifying core validation flow.
+
 ## Notes for high-volume GEO checks (50k-70k rows)
 
 If `location` contains only region/county text (without clean country values) and volume is large:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import re
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -28,6 +28,16 @@ PUBLIC_EMAIL_DOMAINS = {
 RESULT_COL_IDX = 14  # Column N
 COMMENT_COL_IDX = 15  # Column O
 
+EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+TAG_REGEX = re.compile(r"<[^>]+>")
+SPACE_REGEX = re.compile(r"\s+")
+
+COUNTRY_ALIASES = {
+    "usa": ["usa", "united states", "us", "u.s.", "united states of america"],
+    "uk": ["uk", "united kingdom", "britain", "great britain"],
+    "uae": ["uae", "united arab emirates", "u.a.e."],
+}
+
 COMMENT_NORMALIZATION = {
     "Title does not contain required keywords": "Title missing required keywords",
     "Title level does not meet requirement": "Title level below requirement",
@@ -52,8 +62,8 @@ def norm_text(value: object) -> str:
 
 def clean_text(value: object) -> str:
     text = norm_text(value)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\s+", " ", text)
+    text = TAG_REGEX.sub(" ", text)
+    text = SPACE_REGEX.sub(" ", text)
     return text.strip()
 
 
@@ -76,11 +86,21 @@ def to_slug_tokens(text: str) -> List[str]:
     return [t for t in text.split(" ") if len(t) > 1]
 
 
+def normalize_tokens(text: str) -> set:
+    return set(to_slug_tokens(text))
+
+
 def contains_word(text: str, word: str) -> bool:
-    normalized_word = re.sub(r"\s+", " ", word.strip().lower())
+    normalized_word = SPACE_REGEX.sub(" ", word.strip().lower())
     if not normalized_word:
         return False
     return re.search(rf"\b{re.escape(normalized_word)}\b", text.lower()) is not None
+
+
+def location_matches_candidate(location: str, candidate: str) -> bool:
+    c = candidate.strip().lower()
+    aliases = COUNTRY_ALIASES.get(c, [c])
+    return any(contains_word(location, alias) for alias in aliases)
 
 
 def extract_keywords(req_map: Dict[str, str], req_raw: str) -> Optional[List[str]]:
@@ -145,12 +165,10 @@ def infer_min_level(level_text: str, req_raw: str) -> int:
     return 0
 
 
-def infer_title_level(title: str) -> int:
+def infer_title_level(title: str) -> float:
     t = title.lower()
-    if "senior director" in t:
-        return 5
-    if "assistant director" in t:
-        return 3
+
+    base_level = 1.0
     if any(
         k in t
         for k in [
@@ -164,16 +182,22 @@ def infer_title_level(title: str) -> int:
             "founder",
         ]
     ):
-        return 6
-    if any(k in t for k in ["vice president", " vp", "evp", "svp"]):
-        return 5
-    if "director" in t:
-        return 4
-    if "manager" in t:
-        return 3
-    if any(k in t for k in ["head", "lead", "principal"]):
-        return 2
-    return 1
+        base_level = 6.0
+    elif any(k in t for k in ["vice president", " vp", "evp", "svp"]):
+        base_level = 5.0
+    elif "director" in t:
+        base_level = 4.0
+    elif "manager" in t:
+        base_level = 3.0
+    elif any(k in t for k in ["head", "lead", "principal"]):
+        base_level = 2.0
+
+    if "assistant" in t:
+        base_level -= 1.0
+    if "senior" in t:
+        base_level += 0.5
+
+    return max(base_level, 1.0)
 
 
 def email_domain(email: str) -> str:
@@ -365,7 +389,7 @@ def check_geo(row: Mapping[str, object]) -> Tuple[str, str]:
         return "VALID", "GEO requirements could not be parsed"
 
     for c in candidates:
-        if contains_word(location, c):
+        if location_matches_candidate(location, c):
             return "VALID", "Location matches GEO requirements"
 
     return "INVALID", "Location does not match GEO requirements"
@@ -393,7 +417,7 @@ def validate_required_profile_fields(row: Mapping[str, object]) -> Optional[str]
 
 
 def validate_email_field(email: str) -> Optional[str]:
-    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+    if not EMAIL_REGEX.match(email):
         return "Invalid email format"
     domain = email_domain(email)
     if domain in PUBLIC_EMAIL_DOMAINS:
@@ -405,22 +429,23 @@ def validate_industry_field(
     row_industry: str, req_map: Dict[str, str], req_raw: str
 ) -> Optional[str]:
     industries = extract_industry_requirements(req_map, req_raw)
-    req_lower = clean_text(req_raw).lower()
+    req_tokens = normalize_tokens(clean_text(req_raw))
 
     if not row_industry:
         return None
 
-    if industries:
-        if not any(
-            clean_text(i).lower() in row_industry
-            or row_industry in clean_text(i).lower()
-            for i in industries
-        ):
-            return "Industry: Industry does not match requirements"
+    row_tokens = normalize_tokens(row_industry)
+    if not row_tokens:
         return None
 
+    if industries:
+        for i in industries:
+            if normalize_tokens(i) & row_tokens:
+                return None
+        return "Industry: Industry does not match requirements"
+
     raw_ind = req_map.get("industry", "").lower()
-    if "see comment" in raw_ind and row_industry not in req_lower:
+    if "see comment" in raw_ind and not (row_tokens & req_tokens):
         return "Industry: Industry does not match requirements"
     return None
 
@@ -445,25 +470,20 @@ def check_other(row: Mapping[str, object]) -> Tuple[str, str]:
     if status == "a":
         return "INVALID", "Retrieved lead"
 
-    profile_issue = validate_required_profile_fields(row)
-    if profile_issue:
-        issues.append(profile_issue)
-
     email = norm_text(row.get("email")).lower()
-    email_issue = validate_email_field(email)
-    if email_issue:
-        issues.append(email_issue)
-
     row_industry = norm_text(row.get("industry")).lower()
-    industry_issue = validate_industry_field(row_industry, req_map, req_raw)
-    if industry_issue:
-        issues.append(industry_issue)
 
-    company_size_issue = validate_company_size_field(
-        norm_text(row.get("employees")), req_map
-    )
-    if company_size_issue:
-        issues.append(company_size_issue)
+    validators: List[Callable[[Mapping[str, object]], Optional[str]]] = [
+        lambda r: validate_required_profile_fields(r),
+        lambda r: validate_email_field(email),
+        lambda r: validate_industry_field(row_industry, req_map, req_raw),
+        lambda r: validate_company_size_field(norm_text(r.get("employees")), req_map),
+    ]
+
+    for validator in validators:
+        issue = validator(row)
+        if issue:
+            issues.append(issue)
 
     # Apply title/keyword logic for mixed "Other" checks when company/industry checks passed.
     title_result, title_comment = check_title_pl_summary(row)
