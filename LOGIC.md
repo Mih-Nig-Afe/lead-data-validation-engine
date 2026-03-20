@@ -20,7 +20,6 @@
 - `lead_data_validator.py`
 - `Lead_Data_Validation_Results.xlsx`
 - `Lead_Data_Validation_Results.csv`
-- `LOGIC_FLOW.md`
 - `LOGIC.md`
 
 ## Notes
