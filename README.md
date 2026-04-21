@@ -1,12 +1,19 @@
 # Lead Data Validation Engine
 
-`lead-data-validation-engine` is a deterministic backend workflow for validating CRM leads exported from operations spreadsheets. It converts loosely structured lead data into auditable decisions with two explicit outputs per row: `Result` and `Comment`.
+A rule-based backend system for validating CRM lead data exported from operational spreadsheets.
+The system processes loosely structured lead data and produces deterministic, auditable decisions:
+- `VALID` → data meets all requirements
+- `INVALID` → data violates one or more rules
+- `RECHECK` → ambiguous or incomplete data requiring human review
 
-This repo is meant to show engineering thinking, not just task completion:
-- domain-driven validation rules instead of ad hoc spreadsheet edits
-- explainable pass/fail/recheck comments for every decision
-- a clear separation between rule evaluation, batch orchestration, and Excel formatting
-- production signals through tests, a QA script, packaging metadata, and CI
+Each decision is accompanied by a concise explanation in the `Comment` field, enabling full traceability.
+Designed to mirror real-world CRM validation workflows where data quality, explainability, and scalability are critical.
+
+This project is designed to demonstrate engineering thinking beyond task completion:
+- domain-driven validation rules instead of spreadsheet heuristics
+- explainable decisions for every row
+- separation of validation logic, orchestration, and output formatting
+- production-ready signals through testing, QA tooling, and CI
 
 ## Why This Matters
 
@@ -15,6 +22,14 @@ Lead operations data is messy. Titles are inconsistent, proof links vary in qual
 - explicit `RECHECK` paths where the data is ambiguous
 - auditability so analysts can understand why a row was accepted or rejected
 - low-friction outputs that operations teams can open immediately in Excel
+
+## What This Solves
+
+This system replaces manual spreadsheet validation with a deterministic pipeline that:
+- enforces consistent rule evaluation across large datasets
+- reduces human error in lead qualification
+- provides audit-ready explanations for every decision
+- scales from small analyst workflows to high-volume data processing
 
 ## System Overview
 
@@ -100,6 +115,7 @@ The current version is a single-process batch engine, which is the right tradeof
 - persist leads, requirements, decisions, and review tasks in a relational store
 - move workbook ingestion and export generation behind queued background jobs
 - add audit tables or append-only events for reviewer actions and rule changes
+This design ensures the system can evolve from a local validation tool into a distributed data validation service.
 
 For a deeper system-design view, see [ARCHITECTURE.md](./ARCHITECTURE.md) and [COUNTRY_CHECK_SCALING_NOTES.md](./COUNTRY_CHECK_SCALING_NOTES.md).
 
@@ -109,7 +125,15 @@ For a deeper system-design view, see [ARCHITECTURE.md](./ARCHITECTURE.md) and [C
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .[dev]
+
 lead-data-validation-engine
+
+# or explicitly
+python3 lead_data_validator.py \
+  --input DataCheck_DemoCode.xlsx \
+  --output-xlsx Lead_Data_Validation_Results.xlsx \
+  --output-csv Lead_Data_Validation_Results.csv
+
 lead-data-qa
 pytest
 ```
@@ -118,10 +142,9 @@ Default artifacts:
 - input: `DataCheck_DemoCode.xlsx`
 - outputs: `Lead_Data_Validation_Results.xlsx`, `Lead_Data_Validation_Results.csv`
 
-You can also override paths explicitly:
+You can also run QA checks explicitly:
 
 ```bash
-python3 lead_data_validator.py --input DataCheck_DemoCode.xlsx --output-xlsx Lead_Data_Validation_Results.xlsx --output-csv Lead_Data_Validation_Results.csv
 python3 qa_check.py --input DataCheck_DemoCode.xlsx --output Lead_Data_Validation_Results.xlsx
 ```
 
@@ -147,3 +170,11 @@ If this moved from spreadsheet batch processing into a productized CRM subsystem
 - expose manual review queues for `RECHECK` outcomes
 - version rules so historical decisions remain reproducible
 - add tenant-aware ingestion, queues, and metrics for high-volume customers
+
+## Example Output
+
+| Lead | Result | Comment |
+| --- | --- | --- |
+| John Doe | VALID | Title and prooflink match requirements |
+| Jane Smith | INVALID | Missing valid prooflink |
+| Mark Lee | RECHECK | Ambiguous company match |
