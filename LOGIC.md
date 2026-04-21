@@ -1,303 +1,143 @@
-# Lead Data Validator Logic
+# Validation Logic
 
-## Submission Package
+## Objective
 
-Final files to submit:
-- `lead_data_validator.py`
+`lead_data_validator.py` validates each source row and appends two explicit outputs:
+- `Result`
+- `Comment`
+
+Allowed result values:
+- `VALID`
+- `INVALID`
+- `RECHECK`
+
+The engine also exports both workbook and CSV outputs:
 - `Lead_Data_Validation_Results.xlsx`
 - `Lead_Data_Validation_Results.csv`
-- `LOGIC.md`
 
-Run command:
+## Execution Model
+
+Run the validator:
 
 ```bash
-"/Users/fed/Documents/Work 1 test/.venv/bin/python" lead_data_validator.py
+python3 lead_data_validator.py
 ```
 
-## 1) Objective
-This document explains the complete logic implemented in `lead_data_validator.py`, from low-level helper choices to full system behavior.
+Run the QA checks against the generated workbook:
 
-Primary goals:
-- Validate each lead row according to `sub status` and `req` definitions.
-- Return one final decision per row: `VALID`, `INVALID`, or `RECHECK`.
-- Return a clear `Comment` explaining the decision.
-- Export both XLSX and CSV outputs.
-- Make `prooflink` and `employees_prooflink` values clickable in Excel for faster QA review.
+```bash
+python3 qa_check.py
+```
 
-Outputs:
-- `Lead_Data_Validation_Results.xlsx`
-- `Lead_Data_Validation_Results.csv`
+Both scripts also accept explicit path overrides through CLI flags.
 
-## 2) Why these libraries were selected
+## Core Helpers
 
-### pandas
-Why used:
-- Reliable reading and writing of tabular datasets (XLSX and CSV).
-- Efficient row iteration for rule-based validation.
-- Natural way to append `Result` and `Comment` columns.
+### `norm`
+- normalizes null-like values into safe strings
+- prevents repetitive null handling across rule functions
 
-Why it is the right fit:
-- Input is spreadsheet-shaped data with mixed field types.
-- Validation pipeline is row-centric and pandas handles this cleanly.
+### `parse_req`
+- converts the pipe-delimited `req` text into a dictionary
+- provides structured access to fields like `keywords` and `job_level`
 
-### openpyxl
-Why used:
-- Needed for post-processing Excel formatting after data export.
-- Supports column widths, cell alignment, and hyperlinks.
+### `normalize_url_for_hyperlink`
+- preserves valid absolute URLs
+- adds `https://` when a value looks like a valid bare domain/path
+- keeps proof links clickable in output workbooks
 
-Why it is the right fit:
-- pandas writes values well, but workbook styling and clickable links need worksheet-level control.
+### requirement placeholder detection
+- treats values like `-`, `any`, and `see comment` as non-deterministic
+- avoids pretending that every free-form requirement can be enforced safely
 
-### re
-Why used:
-- Email format checks.
-- Keyword token extraction for title keyword matching.
+## Rule Families
 
-Why it is the right fit:
-- Lightweight and precise for string patterns required by this validator.
+### 1. NWC
 
-### urllib.parse.urlparse
-Why used:
-- Safe URL decomposition to extract host/domain from proof links.
-
-Why it is the right fit:
-- Domain matching logic is central for official-website prooflink validation.
-
-### typing
-Why used:
-- Improves readability and maintainability with explicit intent for function inputs/outputs.
-
-Why it is the right fit:
-- Reduces ambiguity and improves robustness for future updates.
-
-## 3) Global constants and why they exist
-
-### PUBLIC_EMAIL_DOMAINS
-Purpose:
-- Blocks free mailbox domains for corporate lead checks.
-
-Reason:
-- Corporate validation requires business email quality, not personal inboxes.
-
-### EMAIL_REGEX
-Purpose:
-- Baseline syntax validation before any domain-level checks.
-
-Reason:
-- Prevents false acceptance of malformed addresses.
-
-### WORD_REGEX
-Purpose:
-- Tokenization for keyword-in-title matching.
-
-Reason:
-- Improves precision for multi-word keyword checks.
-
-## 4) Helper functions and design rationale
-
-### norm
-What it does:
-- Converts null-like values into safe empty strings.
-
-Why needed:
-- Prevents crashes and repeated null-handling logic.
-- Standardizes all downstream validators.
-
-### parse_req
-What it does:
-- Converts `req` text into a dictionary using `key:value` pairs split by `|`.
-
-Why needed:
-- Makes requirements machine-readable and easy to query by validator.
-
-### email_domain
-What it does:
-- Extracts domain portion from an email.
-
-Why needed:
-- Required for corporate domain checks and prooflink-domain comparison.
-
-### base_domain
-What it does:
-- Normalizes domains by removing `www` and comparing root-like suffixes.
-
-Why needed:
-- Avoids false mismatches from subdomains.
-
-### normalize_url_for_hyperlink
-What it does:
-- Accepts full URLs as-is.
-- Converts bare domains/paths into `https`-prefixed links when possible.
-
-Why needed:
-- Ensures prooflink text becomes clickable links in Excel even if source lacks scheme.
-
-## 5) Validation blocks and why each exists
-
-### check_prooflink
-Checks:
-- Missing link -> `INVALID`.
-- `linkedin.com/in` or `zoominfo.com/p` -> `VALID`.
-- Official website accepted when prooflink host domain matches corporate email domain -> `VALID`.
-- Otherwise `INVALID`.
+`N1: NWC` rows map status codes to final decisions:
+- empty or `valid` -> `VALID`
+- `a` -> `INVALID`
+- `!` -> `INVALID`
+- `r`, `no info`, `no company match` -> `RECHECK`
+- unknown codes -> `INVALID`
 
 Why:
-- Matches requested acceptance policy for proof evidence.
+- these statuses already represent a compact business decision table
 
-Comment style:
-- Specific reason for pass/fail, not generic status text.
+### 2. Prooflink
 
-### check_title
-Checks:
-- Missing title -> `INVALID`.
-- Keyword requirement from `req: keywords`.
-- Seniority requirement from `req: job_level` compared against title seniority.
+Accepted evidence:
+- `linkedin.com/in/...`
+- `zoominfo.com/p/...`
+- company-hosted URLs whose base domain matches the corporate email domain
 
 Why:
-- `Title/PL Summary` requires both content relevance and level fit.
+- proof must come either from a trusted external profile source or the company itself
 
-Detail behavior:
-- Can return combined reasons, for example keyword miss plus low level.
-- Returns positive detail with matched keyword when applicable.
+### 3. Title
 
-### check_nwc
-Checks:
-- Empty or `valid` status -> `VALID`.
-- `a` -> `INVALID`.
-- `!` -> `INVALID`.
-- `r`, `no info`, `no company match` -> `RECHECK`.
-- Other unknown status -> `INVALID` with explicit status value.
+Title validation performs two checks when the requirement is deterministic:
+- keyword fit
+- seniority threshold
 
-Why:
-- Implements the required `N1: NWC` decision matrix.
+Important implementation details:
+- title ranking is phrase-based, not single-letter substring matching
+- placeholder requirement values do not trigger hard rejections
+- mixed level strings such as `ANY level ... Manager+` are treated as ambiguous and skipped
+- positive matches return explainable comments, not just a status code
 
-### check_other
-Checks:
-- Required identity/company fields.
-- Email syntax validity.
-- Corporate mailbox requirement.
+### 4. Country/GEO
+
+Current GEO behavior is intentionally conservative:
+- explicit location-to-country matches are validated automatically
+- ambiguous location text returns `RECHECK`
+- the large-scale region/county strategy is documented separately in `COUNTRY_CHECK_SCALING_NOTES.md`
 
 Why:
-- `Other` should guarantee baseline lead quality and completeness.
+- the task asks for design notes around high-volume GEO processing, and false-positive country matching is worse than an explicit review handoff
 
-Comment style:
-- Lists missing fields explicitly.
-- Distinguishes malformed email from public mailbox usage.
+### 5. Out of Business / Bad Data
 
-## 6) Decision router and system control flow
+Rows marked as `Out of Business/Bad data` are immediately set to `INVALID`.
 
-Function:
-- `validate`
+Why:
+- this status already encodes a business decision and should not fall through generic data-hygiene checks
 
-Routing:
-- If `sub status` contains `nwc` -> `check_nwc`.
-- If contains `prooflink` -> `check_prooflink`.
-- If contains `title` -> `check_title`.
-- If contains `other` -> `check_other`.
-- Fallback -> `check_other`.
+### 6. Other
 
-Why this order:
-- Most specific sub-status logic first.
-- Ensures one deterministic path per row.
-- Fallback protects system against unknown labels.
+Baseline data hygiene checks:
+- required identity fields exist
+- email format is valid
+- public mailbox domains are rejected
 
-## 7) Main pipeline behavior
+Why:
+- this is the minimum quality bar for a lead record even when richer evidence is unavailable
 
-Function:
-- `main`
+## Routing
 
-Pipeline:
-1. Read `DataCheck_DemoCode.xlsx`.
-2. Validate each row and collect `Result` + `Comment`.
-3. Append `Result` and `Comment` columns.
-4. Save both XLSX and CSV outputs.
-5. Re-open XLSX with openpyxl for formatting and hyperlink pass.
-6. Save finalized workbook.
+Validation is dispatched by `sub status`:
+- contains `nwc` -> NWC logic
+- contains `country` or `geo` -> GEO logic
+- contains `prooflink` -> prooflink logic
+- contains `title` -> title logic
+- contains `out of business` or `bad data` -> explicit invalidation
+- contains `other` -> baseline data checks
+- unknown values -> baseline data checks as a safe fallback
 
-Why this two-step write process:
-- pandas handles data export efficiently.
-- openpyxl handles presentation features pandas does not fully manage.
+## Output Formatting
 
-## 8) Why comments are detailed
+After validation:
+1. data is written to XLSX and CSV
+2. the workbook is reopened with `openpyxl`
+3. prooflink columns are converted to hyperlinks when possible
+4. `Result`, `Comment`, and `req` columns are wrapped for readability
+5. column widths are capped to avoid unusable sheet layouts
 
-Design target:
-- Reviewer should know exactly why a row passed or failed without reading code.
+Design choice:
+- formatting is header-driven instead of tied to hard-coded column letters
 
-Benefits:
-- Faster QA and analyst review cycles.
-- Better traceability for disputes and rechecks.
-- Easier model tuning when rules evolve.
+## Reliability Signals
 
-Comment design principles used:
-- Actionable language.
-- Single-source reason or compact multi-reason list.
-- Consistent phrasing per rule block.
-
-## 9) Why links are visible and clickable
-
-What is implemented:
-- Hyperlink conversion for both `prooflink` and `employees_prooflink` columns.
-- Non-empty values are converted to clickable links.
-- URL normalization includes `https` fallback.
-
-Why this matters:
-- QA reviewers can open sources instantly.
-- Reduces copy/paste friction and manual errors.
-- Speeds up validation at scale.
-
-## 10) Why column widths and wrapping are set this way
-
-Current strategy:
-- Width is calculated from content length and capped at `45`.
-- Wrap text on `Result`, `Comment`, and `req` columns.
-
-Why this is used:
-- Prevents very long values from exploding worksheet width.
-- Keeps detailed comments readable in-cell.
-- Preserves compact horizontal layout for reviewers.
-
-Vertical alignment choices:
-- Wrapped columns use top alignment for readability.
-- Other columns use center alignment for cleaner scanning.
-
-## 11) Robustness features
-
-- Null-safe text normalization everywhere via `norm`.
-- Defensive URL normalization for malformed proof links.
-- Deterministic row routing with fallback.
-- Explicit handling for unknown NWC status values.
-- Field-level comments to reduce silent failures.
-
-## 12) Optimization choices
-
-Current optimizations:
-- Single read of source workbook with pandas.
-- Simple list accumulation for `Result/Comment` then single assignment.
-- One formatting pass in openpyxl after write.
-
-Why this is efficient enough:
-- Complexity is linear by row count.
-- Suitable for medium-to-large sheets while keeping code maintainable.
-
-Future scale upgrades if needed for 50k to 70k rows:
-- Cache parsed `req` values by unique req text to avoid repeated parsing.
-- Batch title keyword checks by grouped patterns.
-- Reduce per-cell styling to targeted columns only.
-- Optional chunked processing for memory control.
-
-## 13) Clean-up policy used in this document
-
-This document intentionally excludes:
-- Redundant prose that repeats function names without adding intent.
-- Generic statements with no operational impact.
-- Historical alternatives not used in current implementation.
-
-This document intentionally includes:
-- Why each function exists.
-- Why each library is used.
-- Why visual formatting and link behavior are required.
-- Why each decision path returns its specific `Result` and `Comment`.
-
-## 14) End-to-end summary
-
-The system is a deterministic row validator with explicit rule routing by `sub status`, requirement parsing from `req`, detailed decision comments, and reviewer-oriented XLSX output enhancements. It is built to be readable, auditable, and practical for QA workflows where explanation quality and link accessibility matter as much as raw pass/fail outcomes.
+- unit tests cover core rule behavior and output generation
+- `qa_check.py` verifies output structure and hyperlink presence
+- CI runs the tests on push and pull request

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lead-data-validation-engine"
+version = "0.1.0"
+description = "Deterministic lead validation engine for CRM lead QA workflows."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "openpyxl>=3.1",
+    "pandas>=2.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+]
+
+[project.scripts]
+lead-data-validation-engine = "lead_data_validator:main"
+lead-data-qa = "qa_check:main"
+
+[tool.setuptools]
+py-modules = ["lead_data_validator", "qa_check"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
